@@ -14,6 +14,8 @@ The official board is a set of markdown tables regenerated daily — great as a 
 - **What changed** — new, closed/paid, and re-priced bounties over the last 7 or 30 days, computed against archived snapshots. The official board has no history view; this fills that gap.
 - **Trends** — open-bounty count, total board value (Σ or $, converted at each day's own rate), and monthly new-vs-closed flow since March 2025, rendered as dependency-free SVG from ~94 snapshots sampled out of the board's git history (weekly, then daily going forward).
 - **📋 Digest** — one click generates a markdown summary (totals, changes, top opportunities) ready to paste into Discord, Telegram, or the forum.
+- **Repo throughput** — the strongest predictor of getting paid isn't on the issue, it's whether the repository merges outside work at all. A daily pass records merged PRs over the last 12 months per repo, how many distinct authors, how concentrated the merges are, and the median wait. A repo that merged nothing in a year scores zero for it, however attractive the issue looks; the Trends tab lists every repo so "busy but closed in practice" is visible at a glance.
+- **Your stack filters, it doesn't nudge** — selecting languages narrows the board to what you can actually take on, with an honest count ("10 of 106"). Weighting languages inside the score was measured and found to be theatre: a TypeScript developer's top ten stayed ten Scala issues, unchanged.
 - **Contention detection** — some bounties look ideal (high value, "good first issue", an hour of work) and are traps: contributor after contributor opens a pull request, none is ever merged, and the bounty stays listed because nothing ever closes the issue. A daily sweep reads the PRs linked to every bounty issue, flags the ones with work stacked up and nothing merged, shows the whole queue of attempts, and penalises them hard in the score. It also flags issues carrying two contradictory bounty labels, where nobody knows what the work is worth.
 - **Pipeline & payments** — who is working on what right now (submissions + open PRs from the board's triage dashboard, with 🔒 badges on reserved bounties), what has been paid (with on-chain transaction links), and how long submissions have been waiting for review.
 - **★ Watchlist** — star bounties and filter to them; saved locally in your browser.
@@ -34,6 +36,7 @@ scripts/archive.js             daily job: fetch board → history/YYYY-MM-DD.jso
 history/                       one JSON snapshot per day + index.json manifest
 history/trends.json            the aggregate time series behind the Trends charts
 history/contention.json        linked-PR and label data per bounty (daily sweep)
+history/repos.json             merge throughput per repository (daily sweep)
 scripts/backfill.js            one-off used to seed trends.json from upstream git history
 .github/workflows/…            GitHub Action running archive.js every day at 01:30 UTC
 ```

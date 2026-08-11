@@ -114,6 +114,73 @@ async function buildContention(bounties, date) {
   return { fetched: date, items, swept: done, attempted, partial: stopped || done < attempted };
 }
 
+// ---------------------------------------------------------------------------
+// Repo throughput.
+//
+// The most predictive fact for "will my work ever land" is not on the issue —
+// it is whether the repository merges outside work at all, and how fast. A repo
+// can be busy and still merge nothing but core commits from two people, which
+// looks alive from the outside and is closed in practice. One pass per repo
+// (~20 calls) buys a signal no per-issue field can give.
+// ---------------------------------------------------------------------------
+function median(xs) {
+  if (!xs.length) return null;
+  const s = xs.slice().sort((a, b) => a - b);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 ? s[m] : Math.round((s[m - 1] + s[m]) / 2);
+}
+
+async function buildRepos(bounties, date) {
+  if (!process.env.GITHUB_TOKEN) { console.log('repos: no GITHUB_TOKEN, sweep skipped'); return null; }
+  const repos = [...new Set(bounties.map(b => {
+    const m = /github\.com\/([^/]+)\/([^/]+)\//.exec(b.url || '');
+    return m ? `${m[1]}/${m[2]}` : null;
+  }).filter(Boolean))];
+  const items = {};
+  const cutoff = new Date(new Date(date + 'T00:00:00Z').getTime() - 365 * 864e5);
+  let done = 0, failed = 0, stopped = false;
+  for (const full of repos) {
+    try {
+      const merged = [];
+      for (let page = 1; page <= 2; page++) {
+        const list = await gh(`/repos/${full}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=${page}`);
+        if (!Array.isArray(list) || !list.length) break;
+        for (const pr of list) {
+          if (!pr.merged_at) continue;
+          if (new Date(pr.merged_at) < cutoff) continue;
+          merged.push({
+            u: (pr.user && pr.user.login) || '?',
+            days: Math.max(0, Math.round((new Date(pr.merged_at) - new Date(pr.created_at)) / 864e5)),
+            at: pr.merged_at.slice(0, 10)
+          });
+        }
+        if (list.length < 100) break;
+        await sleep(120);
+      }
+      const byAuthor = {};
+      for (const m of merged) byAuthor[m.u] = (byAuthor[m.u] || 0) + 1;
+      const counts = Object.values(byAuthor).sort((a, b) => b - a);
+      items[full] = {
+        merged: merged.length,
+        authors: counts.length,
+        // How concentrated the merges are. 1.0 means a single person merges
+        // everything, which reads as "closed shop" for an outside contributor.
+        top: merged.length ? +(counts[0] / merged.length).toFixed(2) : 0,
+        medianDays: median(merged.map(m => m.days)),
+        last: merged.length ? merged.map(m => m.at).sort().pop() : null
+      };
+      done++;
+      await sleep(120);
+    } catch (e) {
+      failed++;
+      if (e.rateLimited) { console.error('repos: rate limited, stopping sweep early'); stopped = true; break; }
+      if (done === 0 && failed >= 5) { console.error(`repos: ${failed} consecutive failures (${e.message}), aborting sweep`); stopped = true; break; }
+    }
+  }
+  console.log(`repos: swept ${done}/${repos.length}${stopped ? ' (stopped early)' : ''}, ${failed} failed`);
+  return { fetched: date, items, swept: done, attempted: repos.length, partial: stopped || done < repos.length };
+}
+
 // Claim-to-payment pipeline: merged submissions + open PRs from the triage dashboard.
 async function buildPipeline(date) {
   let paidMd = '', statusMd = '', triageMd = '';
@@ -224,6 +291,17 @@ async function buildPipeline(date) {
     }
   } catch (e) { console.error('contention sweep failed, keeping previous data:', e.message); }
 
+  // 4c) repo throughput — same keep-previous-on-failure rule
+  const repoPath = path.join(HIST, 'repos.json');
+  let reposData = fs.existsSync(repoPath) ? JSON.parse(fs.readFileSync(repoPath, 'utf8')) : { fetched: null, items: {} };
+  try {
+    const fresh = await buildRepos(bounties, date);
+    if (fresh && Object.keys(fresh.items).length) {
+      reposData = fresh;
+      fs.writeFileSync(repoPath, JSON.stringify(reposData));
+    }
+  } catch (e) { console.error('repo sweep failed, keeping previous data:', e.message); }
+
   // 5) rewrite index.html data blobs
   const idxFile = path.join(ROOT, 'index.html');
   let html = fs.readFileSync(idxFile, 'utf8');
@@ -238,6 +316,7 @@ async function buildPipeline(date) {
   put('TRENDS', JSON.stringify(trends));
   put('PIPELINE', JSON.stringify(pipeline));
   put('CONTENTION', JSON.stringify(contention));
+  put('REPOS', JSON.stringify(reposData));
   fs.writeFileSync(idxFile, html);
 
   const contested = Object.values(contention.items || {}).filter(c => c.open >= 2 && c.merged === 0).length;
