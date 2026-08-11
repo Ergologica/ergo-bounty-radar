@@ -46,6 +46,10 @@ function parseAllMd(text) {
       org, repo, title, url, value_raw: v, amount, currency, erg,
       age_days, updated_days, comments, lang, reserve, status, author,
       stale: updated_days !== null && updated_days >= 180,
+      // Raw convenience flag only. The app does NOT use this for its "high value"
+      // badge: an ERG threshold silently redefines itself as the ERG price moves
+      // (Σ1,000 was ~$237 in Aug 2026). See isHighValue() in index.html, which
+      // thresholds in dollars and reads pegged amounts directly.
       high_value: erg !== null && erg >= 1000,
       starter: false, // filled from snapshot membership by URL
     });

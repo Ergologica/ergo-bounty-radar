@@ -65,6 +65,7 @@ function labelAmounts(labels) {
 async function buildContention(bounties, date) {
   if (!process.env.GITHUB_TOKEN) { console.log('contention: no GITHUB_TOKEN, sweep skipped'); return null; }
   const items = {};
+  const attempted = bounties.filter(b => /\/issues\/\d+/.test(b.url || '')).length;
   let done = 0, failed = 0, stopped = false;
   for (const b of bounties) {
     const m = /github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)/.exec(b.url || '');
@@ -92,12 +93,13 @@ async function buildContention(bounties, date) {
       const rec = {
         open: prs.filter(p => p.s === 'open').length,
         merged: prs.filter(p => p.s === 'merged').length,
-        closed: prs.filter(p => p.s === 'closed').length,
-        prs: prs.slice(-10),
-        valueConflict: labelAmounts(labels).size > 1,
-        labels: labels.slice(0, 12)
+        closed: prs.filter(p => p.s === 'closed').length
       };
-      if (rec.prs.length || rec.valueConflict) items[b.url] = rec;
+      if (prs.length) rec.prs = prs.slice(-10);
+      if (labelAmounts(labels).size > 1) { rec.valueConflict = true; rec.labels = labels.slice(0, 12); }
+      // Always record, even when clean: a missing entry must mean "not checked",
+      // never "checked and clear". The UI relies on that distinction.
+      items[b.url] = rec;
       done++;
       await sleep(120); // stay clear of the secondary rate limit
     } catch (e) {
@@ -107,8 +109,9 @@ async function buildContention(bounties, date) {
       if (done === 0 && failed >= 8) { console.error(`contention: ${failed} consecutive failures (${e.message}), aborting sweep`); stopped = true; break; }
     }
   }
-  console.log(`contention: swept ${done} issues, ${Object.keys(items).length} with linked PRs or label conflicts, ${failed} failed${stopped ? ' (stopped early)' : ''}`);
-  return { fetched: date, items, swept: done, partial: stopped };
+  const contested = Object.values(items).filter(c => c.open >= 2 && c.merged === 0).length;
+  console.log(`contention: swept ${done}/${attempted} issues (${contested} contested), ${failed} failed${stopped ? ' (stopped early)' : ''}`);
+  return { fetched: date, items, swept: done, attempted, partial: stopped || done < attempted };
 }
 
 // Claim-to-payment pipeline: merged submissions + open PRs from the triage dashboard.
