@@ -24,6 +24,93 @@ async function get(file) {
   return res.text();
 }
 
+// ---------------------------------------------------------------------------
+// Contention sweep.
+//
+// A bounty can look ideal — high value, "good first issue", small task — and
+// still be a trap: several contributors open competing PRs, none is ever
+// merged, and the bounty stays listed forever. Comment count does not catch
+// this; linked pull requests do. For each bounty issue we read the timeline,
+// collect the PRs that reference it, and record how many are open vs merged.
+// We also read the labels, because some issues carry two contradictory bounty
+// amounts and nobody knows what the work is actually worth.
+//
+// Needs a token (Actions provides one). Without it the sweep is skipped and
+// the previous contention.json is kept, so the site degrades quietly.
+// ---------------------------------------------------------------------------
+const API = 'https://api.github.com';
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function gh(p) {
+  const headers = { Accept: 'application/vnd.github+json', 'User-Agent': 'ergo-bounty-radar' };
+  const tok = process.env.GITHUB_TOKEN;
+  if (tok) headers.Authorization = `Bearer ${tok}`;
+  const res = await fetch(API + p, { headers });
+  if (res.status === 403 || res.status === 429) {
+    const err = new Error('rate limited'); err.rateLimited = true; throw err;
+  }
+  if (!res.ok) throw new Error(`${p}: HTTP ${res.status}`);
+  return res.json();
+}
+
+function labelAmounts(labels) {
+  const set = new Set();
+  for (const l of labels) {
+    const m = /bount\w*\s*[-–—:]?\s*([\d]+(?:[.,][\d]+)?)\s*(SigUSD|ERG|USD|GORT|RSN)?/i.exec(l);
+    if (m) set.add(m[1].replace(/[.,]/g, '') + (m[2] || '').toUpperCase());
+  }
+  return set;
+}
+
+async function buildContention(bounties, date) {
+  if (!process.env.GITHUB_TOKEN) { console.log('contention: no GITHUB_TOKEN, sweep skipped'); return null; }
+  const items = {};
+  let done = 0, failed = 0, stopped = false;
+  for (const b of bounties) {
+    const m = /github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)/.exec(b.url || '');
+    if (!m) continue;
+    const [, owner, repo, num] = m;
+    try {
+      const [issue, timeline] = await Promise.all([
+        gh(`/repos/${owner}/${repo}/issues/${num}`),
+        gh(`/repos/${owner}/${repo}/issues/${num}/timeline?per_page=100`)
+      ]);
+      const byNum = new Map();
+      for (const ev of Array.isArray(timeline) ? timeline : []) {
+        if (ev.event !== 'cross-referenced') continue;
+        const src = ev.source && ev.source.issue;
+        if (!src || !src.pull_request) continue;
+        byNum.set(src.number, {
+          n: src.number,
+          s: src.state === 'open' ? 'open' : (src.pull_request.merged_at ? 'merged' : 'closed'),
+          u: (src.user && src.user.login) || null,
+          d: (src.created_at || '').slice(0, 10)
+        });
+      }
+      const prs = [...byNum.values()].sort((x, y) => x.n - y.n);
+      const labels = (issue.labels || []).map(l => (typeof l === 'string' ? l : l.name)).filter(Boolean);
+      const rec = {
+        open: prs.filter(p => p.s === 'open').length,
+        merged: prs.filter(p => p.s === 'merged').length,
+        closed: prs.filter(p => p.s === 'closed').length,
+        prs: prs.slice(-10),
+        valueConflict: labelAmounts(labels).size > 1,
+        labels: labels.slice(0, 12)
+      };
+      if (rec.prs.length || rec.valueConflict) items[b.url] = rec;
+      done++;
+      await sleep(120); // stay clear of the secondary rate limit
+    } catch (e) {
+      failed++;
+      if (e.rateLimited) { console.error('contention: rate limited, stopping sweep early'); stopped = true; break; }
+      // circuit breaker: if nothing at all is getting through, stop hammering
+      if (done === 0 && failed >= 8) { console.error(`contention: ${failed} consecutive failures (${e.message}), aborting sweep`); stopped = true; break; }
+    }
+  }
+  console.log(`contention: swept ${done} issues, ${Object.keys(items).length} with linked PRs or label conflicts, ${failed} failed${stopped ? ' (stopped early)' : ''}`);
+  return { fetched: date, items, swept: done, partial: stopped };
+}
+
 // Claim-to-payment pipeline: merged submissions + open PRs from the triage dashboard.
 async function buildPipeline(date) {
   let paidMd = '', statusMd = '', triageMd = '';
@@ -123,6 +210,17 @@ async function buildPipeline(date) {
   // 4) pipeline & payments
   const pipeline = await buildPipeline(date);
 
+  // 4b) contention sweep — keep the previous file if the sweep is skipped or fails
+  const contPath = path.join(HIST, 'contention.json');
+  let contention = fs.existsSync(contPath) ? JSON.parse(fs.readFileSync(contPath, 'utf8')) : { fetched: null, items: {} };
+  try {
+    const fresh = await buildContention(bounties, date);
+    if (fresh && Object.keys(fresh.items).length) {
+      contention = fresh;
+      fs.writeFileSync(contPath, JSON.stringify(contention));
+    }
+  } catch (e) { console.error('contention sweep failed, keeping previous data:', e.message); }
+
   // 5) rewrite index.html data blobs
   const idxFile = path.join(ROOT, 'index.html');
   let html = fs.readFileSync(idxFile, 'utf8');
@@ -136,7 +234,9 @@ async function buildPipeline(date) {
   put('BASELINES', JSON.stringify(baselines));
   put('TRENDS', JSON.stringify(trends));
   put('PIPELINE', JSON.stringify(pipeline));
+  put('CONTENTION', JSON.stringify(contention));
   fs.writeFileSync(idxFile, html);
 
-  console.log(`archived ${date}: ${bounties.length} bounties · rate ${rate} · baselines ${baselines.d7.date} / ${baselines.d30.date} · pipeline ${pipeline.submissions.length} submissions + ${pipeline.prs.length} open PRs`);
+  const contested = Object.values(contention.items || {}).filter(c => c.open >= 2 && c.merged === 0).length;
+  console.log(`archived ${date}: ${bounties.length} bounties · rate ${rate} · baselines ${baselines.d7.date} / ${baselines.d30.date} · pipeline ${pipeline.submissions.length} submissions + ${pipeline.prs.length} open PRs · contention ${Object.keys(contention.items || {}).length} tracked (${contested} contested)`);
 })().catch(e => { console.error(e); process.exit(1); });

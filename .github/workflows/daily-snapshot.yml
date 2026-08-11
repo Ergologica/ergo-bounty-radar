@@ -20,6 +20,10 @@ jobs:
 
       - name: Fetch board, archive snapshot, refresh index.html
         run: node scripts/archive.js
+        env:
+          # Read-only use: lets the contention sweep query linked PRs and labels
+          # on public upstream repos without hitting the anonymous rate limit.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Commit and push if anything changed
         run: |
